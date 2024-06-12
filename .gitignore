@@ -1,0 +1,13 @@
+*.jpg
+*.JPG
+*.jpeg
+*.JPEG
+*.png
+*.PNG
+*.webp
+datasets/
+DeepFakeFace/
+*__pycache__*
+
+!fake_images
+!real_images
