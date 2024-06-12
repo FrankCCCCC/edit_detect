@@ -9,5 +9,6 @@ datasets/
 DeepFakeFace/
 *__pycache__*
 
-!fake_images
-!real_images
+!fake_images/cifar10_ddpm/*
+!real_images/cifar10/*
+!real_images/out_dist/*
