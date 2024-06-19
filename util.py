@@ -2,10 +2,75 @@ import os
 from typing import Union, Tuple
 import pickle
 
+import numpy as np
 import torch
 from safetensors.torch import save_file, safe_open
 
 import bz2file as bz2
+
+def normalize(x: Union[np.ndarray, torch.Tensor], vmin_in: float=None, vmax_in: float=None, vmin_out: float=0, vmax_out: float=1, eps: float=1e-5) -> Union[np.ndarray, torch.Tensor]:
+    if vmax_out == None and vmin_out == None:
+        return x
+
+    if isinstance(x, np.ndarray):
+        if vmin_in == None:
+            min_x = np.min(x)
+        else:
+            min_x = vmin_in
+        if vmax_in == None:
+            max_x = np.max(x)
+        else:
+            max_x = vmax_in
+    elif isinstance(x, torch.Tensor):
+        if vmin_in == None:
+            min_x = torch.min(x)
+        else:
+            min_x = vmin_in
+        if vmax_in == None:
+            max_x = torch.max(x)
+        else:
+            max_x = vmax_in
+    else:
+        raise TypeError("x must be a torch.Tensor or a np.ndarray")
+    if vmax_out == None:
+        vmax_out = max_x
+    if vmin_out == None:
+        vmin_out = min_x
+    return ((x - min_x) / (max_x - min_x + eps)) * (vmax_out - vmin_out) + vmin_out
+
+def set_generator(generator: Union[int, torch.Generator]) -> torch.Generator:
+    if isinstance(generator, int):
+        rng: torch.Generator = torch.Generator()
+        rng.manual_seed(generator)
+    elif isinstance(generator, torch.Generator):
+        rng = generator
+    return rng
+
+def mse(x0: torch.Tensor, pred_x0: torch.Tensor) -> torch.Tensor:
+    return ((x0 - pred_x0) ** 2).mean(list(range(x0.dim()))[1:])
+
+def mse_series(x0: torch.Tensor, pred_orig_images: list[torch.Tensor]):
+    # pred_orig_images_stck: torch.Tensor = torch.stack(pred_orig_images, dim=0)
+    t: int = len(pred_orig_images)
+    n: int = pred_orig_images.shape[1]
+    x0_stck = x0.repeat(t, *([1] * (len(pred_orig_images.shape) - 1)))
+    # print(f"t: {t}, n: {n}, x0_stck: {x0_stck.shape}, pred_orig_images: {pred_orig_images.shape}")
+    residual: torch.Tensor = ((x0_stck - pred_orig_images) ** 2).mean(list(range(x0_stck.dim()))[2:]).transpose(0, 1)
+    # print(f"residual: {residual.shape}")
+    
+    return residual
+
+def center_mse_series(pred_orig_images: list[torch.Tensor]):
+    # pred_orig_images_stck: torch.Tensor = torch.stack(pred_orig_images, dim=0)
+    t: int = len(pred_orig_images)
+    n: int = pred_orig_images.shape[1]
+    pred_orig_images_mean: torch.Tensor = pred_orig_images.mean(dim=1, keepdim=True)
+    pred_orig_images_mean_stck = pred_orig_images_mean.repeat(1, n, *([1] * (len(pred_orig_images.shape) - 2)))
+    # print(f"t: {t}, n: {n}, pred_orig_images_mean: {pred_orig_images_mean.shape}, pred_orig_images_mean_stck: {pred_orig_images_mean_stck.shape}, pred_orig_images: {pred_orig_images.shape}")
+    residual: torch.Tensor = ((pred_orig_images_mean_stck - pred_orig_images) ** 2).mean(list(range(pred_orig_images_mean_stck.dim()))[2:]).transpose(0, 1)
+    # print(f"residual: {residual.shape}")
+    
+    return residual
 
 class Recorder:
     EMPTY_HANDLER_SKIP: str = "SKIP"
@@ -129,6 +194,7 @@ class DirectRecorder:
     NOISY_IMAGE_KEY: str = 'NOISY_IMAGE'
     TS_KEY: str = "ts"
     LABEL_KEY: str = "LABEL"
+    RESIDUAL_KEY: str = 'RESIDUAL'
     def __init__(self, top_dict_max_size: int=10000, sub_dict_max_size: int=10000) -> None:
         self.__top_dict__: TensorDict[torch.Tensor, TensorDict[torch.Tensor, dict]] = TensorDict(max_size=top_dict_max_size)
         self.__top_dict_max_size__: int = top_dict_max_size
@@ -182,7 +248,11 @@ class DirectRecorder:
         self.__init_key__(top_key, sub_key)
         self.__top_dict__[top_key][sub_key][DirectRecorder.NOISY_IMAGE_KEY] = values
         
-    def batch_update(self, top_keys: torch.Tensor, sub_keys: torch.Tensor, seq: torch.Tensor, reconst: torch.Tensor, noise: torch.Tensor, ts: int, label: str):
+    def update_residual(self, top_key: torch.Tensor, sub_key: torch.Tensor, values):
+        self.__init_key__(top_key, sub_key)
+        self.__top_dict__[top_key][sub_key][DirectRecorder.RESIDUAL_KEY] = values
+        
+    def batch_update(self, top_keys: torch.Tensor, sub_keys: torch.Tensor, seq: torch.Tensor, reconst: torch.Tensor, noise: torch.Tensor, residual: torch.Tensor, ts: int, label: str):
         Ts: int = seq.shape[1]
         for i, (top_key, sub_key) in enumerate(zip(top_keys, sub_keys)):
             # print(f"top_key: {top_key.shape}, sub_key: {sub_key.shape}")
@@ -194,6 +264,7 @@ class DirectRecorder:
             self.update_noisy_image(top_key=top_key, sub_key=sub_key, values=sub_key)
             self.update_ts(top_key=top_key, sub_key=sub_key, values=ts)
             self.update_label(top_key=top_key, sub_key=sub_key, values=label)
+            self.update_residual(top_key=top_key, sub_key=sub_key, values=residual)
             
     def __pack_internal__(self) -> dict:
         return {DirectRecorder.TOP_DICT_KEY: self.__top_dict__, DirectRecorder.TOP_DICT_MAX_SIZE_KEY: self.__top_dict_max_size__, DirectRecorder.SUB_DICT_MAX_SIZE_KEY: self.__sub_dict_max_size__}
@@ -276,20 +347,33 @@ class SafetensorRecorder(DirectRecorder):
             self.__data__[SafetensorRecorder.NOISY_IMAGE_KEY].append(values)
         else:
             self.__data__[SafetensorRecorder.NOISY_IMAGE_KEY] = [values]
+            
+    def update_residual(self, values: torch.Tensor):
+        if SafetensorRecorder.RESIDUAL_KEY in self.__data__:
+            self.__data__[DirectRecorder.RESIDUAL_KEY].append(values)
+        else:
+            self.__data__[SafetensorRecorder.RESIDUAL_KEY] = [values]
         
-    def batch_update(self, images: torch.Tensor, noisy_images: torch.Tensor, seqs: torch.Tensor, reconsts: torch.Tensor, noises: torch.Tensor, timestep: int, label: str):
+    def batch_update(self, images: torch.Tensor, noisy_images: torch.Tensor, reconsts: torch.Tensor, noises: torch.Tensor, timestep: int, label: str, seqs: torch.Tensor=None, residuals: torch.Tensor=None):
         n: int = len(images)
         labels: list[str] = [label] * n
         tss: list[int] = [timestep] * n
-        for i, (image, noisy_image, noise, reconst, seq, lab, ts) in enumerate(zip(images, noisy_images, noises, reconsts, seqs, labels, tss)):
+        if seqs is None:
+            seqs = [None] * n
+        if residuals is None:
+            residuals = [None] * n
+        for i, (image, noisy_image, noise, reconst, seq, residual, lab, ts) in enumerate(zip(images, noisy_images, noises, reconsts, seqs, residuals, labels, tss)):
             # print(f"top_key: {top_key.shape}, sub_key: {sub_key.shape}")
             # self.set_seq(top_key=top_key, sub_key=sub_key, values=torch.squeeze(seq[:, i, :, :, :]), indices=[i for i in range(Ts)])
             # print(f"Update: ts: {torch.LongTensor([ts])}, label: {torch.LongTensor([lab])}")
-            self.update_seq(values=seq)
+            if seq is not None:
+                self.update_seq(values=seq)
             self.update_reconst(values=reconst)
             self.update_noise(values=noise)
             self.update_image(values=image)
             self.update_noisy_image(values=noisy_image)
+            if residual is not None:
+                self.update_residual(values=residual)
             self.update_ts(values=torch.LongTensor([ts]))
             self.update_label(values=torch.LongTensor([lab]))
             
@@ -304,6 +388,11 @@ class SafetensorRecorder(DirectRecorder):
             raise ValueError(f"Arguement mode should be {SafetensorRecorder.PROC_BEF_SAVE_MODE_STACK} or {SafetensorRecorder.PROC_BEF_SAVE_MODE_CAT}")
             
     def save(self, path: Union[str, os.PathLike], file_ext: str='safetensors', proc_mode: str=PROC_BEF_SAVE_MODE_CAT) -> None:
+        if SafetensorRecorder.RESIDUAL_KEY not in self.__data__:
+            path = f"{path}_woRes"
+        if SafetensorRecorder.SEQ_KEY not in self.__data__:
+            path = f"{path}_woSeq"
+            
         file_path: str = f"{path}.{file_ext}"
         if file_ext is None or file_ext == "":
             file_path: str = path

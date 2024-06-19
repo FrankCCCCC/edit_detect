@@ -5,6 +5,11 @@
 *.png
 *.PNG
 *.webp
+*.zip
+*.tgz
+*.safetensors
+*.hdf5
+*tmp*
 datasets/
 DeepFakeFace/
 *__pycache__*
