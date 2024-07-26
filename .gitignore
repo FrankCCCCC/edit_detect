@@ -15,8 +15,22 @@ DeepFakeFace/
 *__pycache__*
 VillanDiffusion/
 sd_lora/
+out_dist_*/
+*DDPM_*/
+direct_record*/
+fourier_spectral*/
 
+!fake_images/celeba_hq_256_ddpm/*
 !fake_images/cifar10_ddpm/*
+!fake_images/CD_L2_BEDROOM256/
+!fake_images/CD_L2_IMAGENET64/
+!fake_images/CD_LPIPS_IMAGENET64/
+
+!real_images/celeba_hq_256_jpg_n2048/*
+!real_images/celeba_hq_256_png_n2048/*
 !real_images/cifar10/*
-!real_images/out_dist/*
+!real_images/imagenette_256/
+!real_images/out_dist_ffhq/*
+!real_images/out_dist_horse/*
+!real_images/out_dist_human_face/*
 
