@@ -129,7 +129,7 @@ class DDPMPipeline(DiffusionPipeline):
             # 2. compute previous image: x_t -> x_t-1
             output = self.scheduler.step(model_output, t, image, generator=generator)
             image = output.prev_sample
-            pred_orig_images.append(output.pred_original_sample)
+            pred_orig_images.append(output.pred_original_sample.detach().cpu())
 
         pred_orig_images = torch.stack(pred_orig_images)
         latents = image.detach().cpu()
