@@ -13,12 +13,13 @@
 datasets/
 DeepFakeFace/
 *__pycache__*
-VillanDiffusion/
+VillanDiffusion/*
 sd_lora/
 out_dist_*/
 *DDPM_*/
 direct_record*/
 fourier_spectral*/
+wandb/
 
 !fake_images/celeba_hq_256_ddpm/*
 !fake_images/cifar10_ddpm/*
@@ -34,3 +35,5 @@ fourier_spectral*/
 !real_images/out_dist_horse/*
 !real_images/out_dist_human_face/*
 
+!datasets/fake_images/*/*jpg
+!datasets/real_images/*/*

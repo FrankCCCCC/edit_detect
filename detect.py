@@ -3,7 +3,7 @@ import glob
 import os
 import pathlib
 import argparse
-from typing import Union, Tuple
+from typing import Union, Tuple, List, Dict
 
 from tqdm import tqdm
 import numpy as np
@@ -16,10 +16,10 @@ from matplotlib import pyplot as plt
 
 from diffusers import StableDiffusionPipeline, DiffusionPipeline, DDPMPipeline, DDIMScheduler, DDIMInverseScheduler
 
-from util import DirectRecorder, SafetensorRecorder, normalize, set_generator, mse, mse_series, mse_traj, ModelDataset, name_prefix, list_all_images
+from util import DirectRecorder, SafetensorRecorder, normalize, set_generator, mse, mse_series, mse_traj, ModelDataset, name_prefix, list_all_images, DistanceFn
             
 class NoisyDataset(Dataset):
-    def __init__(self, image: Union[torch.Tensor, Image.Image, str, os.PathLike, pathlib.PurePath], size: Union[int, Tuple[int, int], list[int]], epsilon_scale: float=1.0, num: int=1000, vmin: float=-1.0, vmax: float=1.0, generator: Union[int, torch.Generator]=0):
+    def __init__(self, image: Union[torch.Tensor, Image.Image, str, os.PathLike, pathlib.PurePath], size: Union[int, Tuple[int, int], List[int]], epsilon_scale: float=1.0, num: int=1000, vmin: float=-1.0, vmax: float=1.0, generator: Union[int, torch.Generator]=0):
         if isinstance(image, torch.Tensor):
             self.__image__ = image
         elif isinstance(image, Image.Image):
@@ -67,7 +67,7 @@ class NoisyDatasets(Dataset):
     LATENT_KEY: str = "Latent"
     RECONST_KEY: str = "Reconst"
     RESIDUAL_KEY: str = "Residual"
-    def __init__(self, images: Union[torch.Tensor, Image.Image, str, os.PathLike, pathlib.PurePath], size: Union[int, Tuple[int, int], list[int]], epsilon_scale: float, num: int=1000, vmin: float=-1.0, vmax: float=1.0, generator: Union[int, torch.Generator]=0):
+    def __init__(self, images: Union[torch.Tensor, Image.Image, str, os.PathLike, pathlib.PurePath], size: Union[int, Tuple[int, int], List[int]], epsilon_scale: float, num: int=1000, vmin: float=-1.0, vmax: float=1.0, generator: Union[int, torch.Generator]=0):
         self.__vmin__: float = vmin
         self.__vmax__: float = vmax
         self.__trans__ = transforms.Compose([
@@ -75,7 +75,7 @@ class NoisyDatasets(Dataset):
                             transforms.ConvertImageDtype(torch.float),
                             transforms.Lambda(lambda x: normalize(vmin_in=0, vmax_in=1, vmin_out=self.__vmin__, vmax_out=self.__vmax__, x=x)),
                          ])
-        # self.__data__: dict[int, dict[str, dict[int, Union[torch.Tensor, np.ndarray]]]] = {}
+        # self.__data__: Dict[int, Dict[str, Dict[int, Union[torch.Tensor, np.ndarray]]]] = {}
         self.__generator__ = set_generator(generator=generator)
         self.__epsilon_scale__ = epsilon_scale
         
@@ -117,7 +117,7 @@ class NoisyDatasets(Dataset):
         noise = torch.randn(size=(num, *proc_img.shape), generator=self.__generator__) * epsilon_scale
         return {NoisyDataset.IMAGE_KEY: proc_img, NoisyDataset.NOISE_KEY: noise, NoisyDataset.LATENT_KEY: {}, NoisyDataset.RECONST_KEY: {}, NoisyDataset.RESIDUAL_KEY: {}}        
 
-    def __load_images__(self, images: Union[list[Union[torch.Tensor, Image.Image, str, os.PathLike, pathlib.PurePath]], torch.Tensor, Image.Image, str, os.PathLike, pathlib.PurePath], num: int, epsilon_scale: float) -> torch.Tensor:
+    def __load_images__(self, images: Union[List[Union[torch.Tensor, Image.Image, str, os.PathLike, pathlib.PurePath]], torch.Tensor, Image.Image, str, os.PathLike, pathlib.PurePath], num: int, epsilon_scale: float) -> torch.Tensor:
         if isinstance(images, torch.Tensor):
             if len(images.shape) == 3:
                 images = images.unsqueeze(0)
@@ -157,12 +157,12 @@ def prep_noisy_dataloader(batch_size: int, image: Union[torch.Tensor, Image.Imag
     return dl
 
 class RealFakeDataset(Dataset):
-    def __init__(self, root: Union[str, os.PathLike, pathlib.PurePath], size: Union[int, Tuple[int, int], list[int]], dir_label_map: dict[str, int]={'real': 0, 'fake': 1}, vmin: float=-1.0, vmax: float=1.0, generator: Union[int, torch.Generator]=0, image_exts: list[str]=['png, jpg, jpeg, webp'], ext_case_sensitive: bool=False):
-        self.__images__: list[str] = []
-        self.__labels__: list[int] = []
+    def __init__(self, root: Union[str, os.PathLike, pathlib.PurePath], size: Union[int, Tuple[int, int], List[int]], dir_label_map: Dict[str, int]={'real': 0, 'fake': 1}, vmin: float=-1.0, vmax: float=1.0, generator: Union[int, torch.Generator]=0, image_exts: List[str]=['png, jpg, jpeg, webp'], ext_case_sensitive: bool=False):
+        self.__images__: List[str] = []
+        self.__labels__: List[int] = []
         if isinstance(root, str) or isinstance(root, os.PathLike) or isinstance(root, pathlib.PurePath):
             for dir, label in dir_label_map.items():
-                appended_list: list[str] = list_all_images(os.path.join(root, dir), image_exts=image_exts, ext_case_sensitive=ext_case_sensitive)
+                appended_list: List[str] = list_all_images(os.path.join(root, dir), image_exts=image_exts, ext_case_sensitive=ext_case_sensitive)
                 self.__images__ += appended_list
                 self.__labels__ += [label] * len(appended_list)
         else:
@@ -187,7 +187,7 @@ class RealFakeDataset(Dataset):
     def __getitem__(self, idx):
         return self.__trans__(self.__images__[idx]), self.__labels__[idx]
 
-def prep_real_fake_dataloader(batch_size: int, root: Union[str, os.PathLike, pathlib.PurePath], size: Union[int, Tuple[int, int], list[int]], dir_label_map: dict[str, int]={'real': 0, 'fake': 1}, generator: Union[int, torch.Generator]=0, image_exts: list[str]=['png, jpg, jpeg, webp'], ext_case_sensitive: bool=False) -> DataLoader:
+def prep_real_fake_dataloader(batch_size: int, root: Union[str, os.PathLike, pathlib.PurePath], size: Union[int, Tuple[int, int], List[int]], dir_label_map: Dict[str, int]={'real': 0, 'fake': 1}, generator: Union[int, torch.Generator]=0, image_exts: List[str]=['png, jpg, jpeg, webp'], ext_case_sensitive: bool=False) -> DataLoader:
     rng: torch.Generator = set_generator(generator=generator)
     
     ds: RealFakeDataset = RealFakeDataset(root=root, size=size, dir_label_map=dir_label_map, image_exts=image_exts, generator=generator, ext_case_sensitive=ext_case_sensitive)
@@ -283,7 +283,7 @@ def compute_flow_timestep(pipeline: DiffusionPipeline, timestep: Union[int, torc
     beta_prod_t = 1 - alpha_prod_t
     print(f"Noise Scale(Beta Bar T): {beta_prod_t ** 0.5}, Content Scale(Alpha Bar T): {alpha_prod_t ** 0.5}")
     
-    eps_dis_ls: list[torch.Tensor] = []
+    eps_dis_ls: List[torch.Tensor] = []
     for img, noise in dl:
         # print(f"Img: {img.shape}, noise: {noise.shape}")
         t: torch.IntTensor = timestep[torch.multinomial(timestep_dist, len(img), replacement=True)]
@@ -364,12 +364,24 @@ def compute_gaussian_reconstruct(pipeline: DiffusionPipeline, noise_scale: Union
     # beta_prod_t = 1 - alpha_prod_t
     # print(f"Noise Scale(Beta Bar T): {beta_prod_t ** 0.5}, Content Scale(Alpha Bar T): {alpha_prod_t ** 0.5}")
     
-    x0_dis_ls: list[torch.Tensor] = []
+    x0_dis_ls: List[torch.Tensor] = []
     for img, noise in dl:
         # print(f"Img: {img.shape}, noise: {noise.shape}")
         noise_scale_sample: torch.FloatTensor = noise_scale[torch.multinomial(noise_scales_dist, len(img), replacement=True)]
         pred_x0 = reconstruct_x0_n_steps(pipeline=pipeline, x0=img, noise_scale=noise_scale_sample, noise=noise, generator=generator).to(device)
-        x0_dis = mse(x0=img, pred_x0=pred_x0)
+        """
+        MSE distance metric
+        """
+        # x0_dis = mse(x0=img, pred_x0=pred_x0)
+        """
+        High-Pass kernel and L2 Metric
+        """
+        fft_fn = DistanceFn.embed_fft_1d_fn(thres=0.3, nd=-3)
+        img_fft, pred_x0_fft = fft_fn(img), fft_fn(pred_x0)
+        norm_dis = DistanceFn.norm_fn(loss_type=DistanceFn.NORM_L2)(img_fft, pred_x0_fft)
+        x0_dis = DistanceFn.reduce_fn(reduce_type=DistanceFn.REDUCE_MEAN, nd=-1)(norm_dis)
+        # x0_dis = mse(x0=img, pred_x0=pred_x0)
+        
         # print(f"x0_dis: {x0_dis.shape}")
         x0_dis_ls.append(x0_dis)
         
@@ -384,9 +396,9 @@ def compute_direct_reconst(pipeline: DiffusionPipeline, timestep: int, batch_siz
     
     dl = prep_noisy_dataloader(batch_size=batch_size, image=image, size=pipeline.unet.config.sample_size, num=num, generator=generator, device=device)
     
-    x0_dis_ls: list[torch.Tensor] = []
-    x0_dis_trend_ls: list[torch.Tensor] = []
-    # pred_dis_traj_ls: list[torch.Tensor] = []
+    x0_dis_ls: List[torch.Tensor] = []
+    x0_dis_trend_ls: List[torch.Tensor] = []
+    # pred_dis_traj_ls: List[torch.Tensor] = []
     for img, noise in dl:
         # print(f"Img: {img.shape}, noise: {noise.shape}")
         # noise_scale_sample: torch.FloatTensor = timestep[torch.multinomial(noise_scales_dist, len(img), replacement=True)]
@@ -413,7 +425,7 @@ def compute_direct_reconst(pipeline: DiffusionPipeline, timestep: int, batch_siz
     print(f"x0_dis_trend_ls: {x0_dis_trend_ls.shape}")
     return x0_dis_ls, x0_dis_ls.mean(), x0_dis_ls.var(), x0_dis_trend_ls, recorder
 
-def plot_scatter(x_set_list: list[list[torch.Tensor]], y_set_list: list[list[torch.Tensor]], color_set_list: list[str]=['tab:blue', 'tab:orange', 'tab:red'], zorder_set_list: list[str]=[0, 2, 1], label_set_list: list[str]=['Training Real', 'Out Dist Real', 'Fake'], title: str=f"Flow-In Rate at Timestep", fig_name: str='scatter.jpg', xlabel: str='Mean', ylabel: str='Variance', xscale: str='linear', yscale: str='linear'):
+def plot_scatter(x_set_list: List[List[torch.Tensor]], y_set_list: List[List[torch.Tensor]], color_set_list: List[str]=['tab:blue', 'tab:orange', 'tab:red'], zorder_set_list: List[str]=[0, 2, 1], label_set_list: List[str]=['Training Real', 'Out Dist Real', 'Fake'], title: str=f"Flow-In Rate at Timestep", fig_name: str='scatter.jpg', xlabel: str='Mean', ylabel: str='Variance', xscale: str='linear', yscale: str='linear'):
     min_len: int = min(len(x_set_list), len(y_set_list), len(color_set_list), len(label_set_list), len(zorder_set_list))
     fig, ax = plt.subplots(figsize=(8, 5))
     for x, y, color, label, zorder in zip(x_set_list[:min_len], y_set_list[:min_len], color_set_list[:min_len], label_set_list[:min_len], zorder_set_list[:min_len]):
@@ -438,7 +450,7 @@ def plot_scatter(x_set_list: list[list[torch.Tensor]], y_set_list: list[list[tor
     plt.savefig(fig_name)
     plt.show()
     
-def plot_run(x_set_list: list[list[torch.Tensor]], color_set_list: list[str]=['tab:blue', 'tab:orange', 'tab:red'], label_set_list: list[str]=['Training Real', 'Out Dist Real', 'Fake'], title: str=f"Reconst Loss at Timestep", fig_name: str='line.jpg', is_plot_var: bool=True):
+def plot_run(x_set_list: List[List[torch.Tensor]], color_set_list: List[str]=['tab:blue', 'tab:orange', 'tab:red'], label_set_list: List[str]=['Training Real', 'Out Dist Real', 'Fake'], title: str=f"Reconst Loss at Timestep", fig_name: str='line.jpg', is_plot_var: bool=True):
     min_len: int = min(len(x_set_list), len(color_set_list), len(label_set_list))
     fig, ax = plt.subplots(figsize=(8, 5))
     
@@ -492,10 +504,10 @@ def plot_run(x_set_list: list[list[torch.Tensor]], color_set_list: list[str]=['t
     plt.savefig(fig_name)
     plt.show()
     
-def plot_flow_timesteps(pipeline: DDPMPipeline, real_images, out_dist_real_images, fake_images, sample_num: int = 100, batch_size: int = 1024, timesteps: list[int] = [1, 2, 4, 8, 16, 32, 50, 100, 200, 400, 800]):
-    real_images_list: list[str] = list_all_images(root=real_images)
-    out_dist_real_images_list: list[str] = list_all_images(root=out_dist_real_images)
-    fake_images_list: list[str] = list_all_images(root=fake_images)
+def plot_flow_timesteps(pipeline: DDPMPipeline, real_images, out_dist_real_images, fake_images, sample_num: int = 100, batch_size: int = 1024, timesteps: List[int] = [1, 2, 4, 8, 16, 32, 50, 100, 200, 400, 800]):
+    real_images_list: List[str] = list_all_images(root=real_images)
+    out_dist_real_images_list: List[str] = list_all_images(root=out_dist_real_images)
+    fake_images_list: List[str] = list_all_images(root=fake_images)
     
     image_lists = [real_images_list, out_dist_real_images_list, fake_images_list]
     
@@ -518,10 +530,10 @@ def plot_flow_timesteps(pipeline: DDPMPipeline, real_images, out_dist_real_image
         
         plot_scatter(x_set_list=eps_dis1_set_list, y_set_list=eps_dis2_set_list, fig_name=f'scatter_{timestep}.jpg', title=f"Flow-In Rate at Timestep {timestep}")
         
-def plot_gaussian_reconstruction(pipeline: DDPMPipeline, real_images, out_dist_real_images, fake_images, sample_num: int=100, batch_size: int=1024, noise_scale: Union[list[float], float]=0.01, n: int=10):
-    real_images_list: list[str] = list_all_images(root=real_images)
-    out_dist_real_images_list: list[str] = list_all_images(root=out_dist_real_images)
-    fake_images_list: list[str] = list_all_images(root=fake_images)
+def plot_gaussian_reconstruction(pipeline: DDPMPipeline, real_images, out_dist_real_images, fake_images, sample_num: int=100, batch_size: int=1024, noise_scale: Union[List[float], float]=0.01, n: int=10):
+    real_images_list: List[str] = list_all_images(root=real_images)
+    out_dist_real_images_list: List[str] = list_all_images(root=out_dist_real_images)
+    fake_images_list: List[str] = list_all_images(root=fake_images)
     
     image_lists = [real_images_list, out_dist_real_images_list, fake_images_list]
     
@@ -547,9 +559,9 @@ def plot_gaussian_reconstruction(pipeline: DDPMPipeline, real_images, out_dist_r
     
 def plot_direct_reconst(pipeline: DDPMPipeline, real_images, out_dist_real_images, fake_images, sample_num: int=100, batch_size: int=1024, timestep: int=0, n: int=10, name_prefix: str=""):
     recorder: SafetensorRecorder = SafetensorRecorder()
-    real_images_list: list[str] = list_all_images(root=real_images)
-    out_dist_real_images_list: list[str] = list_all_images(root=out_dist_real_images)
-    fake_images_list: list[str] = list_all_images(root=fake_images)
+    real_images_list: List[str] = list_all_images(root=real_images)
+    out_dist_real_images_list: List[str] = list_all_images(root=out_dist_real_images)
+    fake_images_list: List[str] = list_all_images(root=fake_images)
     
     image_lists = [real_images_list, out_dist_real_images_list, fake_images_list]
     # image_lists_labels = ['real', 'out_dist', 'fake']
@@ -584,41 +596,61 @@ def plot_direct_reconst(pipeline: DDPMPipeline, real_images, out_dist_real_image
     plot_scatter(x_set_list=x0_dis1_set_list, y_set_list=x0_dis2_set_list, fig_name=f'{name_prefix}scatter_direct_ts{ts_str}_n{n}.jpg', title=f"Direct Reconstruction at Timestep {timestep}")
     plot_run(x_set_list=x0_dis_trend_set_list, fig_name=f'{name_prefix}line_direct_ts{ts_str}_n{n}.jpg', title=f"Direct Reconstruction", is_plot_var=False)
 
-# %%
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--n', type=int)
-    parser.add_argument('--ns', type=float, required=False)
-    parser.add_argument('--ts', type=int, required=False)
-    
-    args = parser.parse_args()
-    print(f"n: {args.n}, ns: {args.ns}, ts: {args.ts}")
-    
-    md: ModelDataset = ModelDataset().set_model_dataset(model=ModelDataset.DDPM_EMA, dataset=ModelDataset.CELEBA_HQ_256, out_dist=ModelDataset.OUT_DIST_FFHQ)
-    
+def detect_fourier_lora():
+    ts = 1
+    n = 100
     eps_dis_num: int = 100
     batch_size: int = 1024
-    # timestep: int = 100
-    timesteps: list[int] = [1, 2, 4, 8, 16, 32, 50, 100, 200, 400, 800]
-    # model_id = "google/ddpm-cifar10-32"
-    # model_id = "google/ddpm-celebahq-256"
-    pipeline = DDPMPipeline.from_pretrained(md.model)
+    # timesteps: List[int] = [1, 2, 4, 8, 16]
+    model_id = "VillanDiffusion/fres_DDPM-CELEBA-HQ-256_CELEBA-HQ_ep50_sde_c1.0_p0.0_epr0.0_BOX_14-HAT_psi1_lr6e-05_vp1.0_ve1.0"
+    lora_id = "VillanDiffusion/fres_DDPM-CELEBA-HQ-256_CELEBA-HQ_ep50_sde_c1.0_p0.0_epr0.0_BOX_14-HAT_psi1_lr6e-05_vp1.0_ve1.0/lora"
+    name_prefix = "fourier_lora"
+    real_images = "real_images/celeba_hq_256_jpg_n2048"
+    out_dist_real_images = "fake_images/celeba_hq_256_ddpm"
+    fake_images = "fake_images/celeba_hq_256_ddpm_1"
+    pipeline = DDPMPipeline.from_pretrained(model_id, low_cpu_mem_usage=False, device_map=None, local_files_only=True)
+    pipeline.load_lora_weights(lora_id)
+    
+    plot_direct_reconst(name_prefix=name_prefix, pipeline=pipeline, real_images=real_images, out_dist_real_images=out_dist_real_images, fake_images=fake_images, sample_num=100, batch_size=1024, timestep=ts, n=n)
+
+# %%
+if __name__ == "__main__":
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument('--n', type=int)
+    # parser.add_argument('--ns', type=float, required=False)
+    # parser.add_argument('--ts', type=int, required=False)
+    
+    # args = parser.parse_args()
+    # print(f"n: {args.n}, ns: {args.ns}, ts: {args.ts}")
+    
+    # md: ModelDataset = ModelDataset().set_model_dataset(model=ModelDataset.DDPM_EMA, dataset=ModelDataset.CELEBA_HQ_256, out_dist=ModelDataset.OUT_DIST_FFHQ)
+    
+    # eps_dis_num: int = 100
+    # batch_size: int = 1024
+    # # timestep: int = 100
+    # timesteps: List[int] = [1, 2, 4, 8, 16, 32, 50, 100, 200, 400, 800]
+    # # model_id = "google/ddpm-cifar10-32"
+    # # model_id = "google/ddpm-celebahq-256"
+    # pipeline = DDPMPipeline.from_pretrained(md.model)
     
     
-    # eps_dis_ls, eps_dis1, eps_dis2 = compute_flow_timestep(pipeline=pipeline, timestep=1, batch_size=512, image=image)
-    # print(f"Moment: {eps_dis1}, {eps_dis2}")
-    # print(f"eps_dis_ls: {eps_dis_ls.shape}")
-    # plt.hist(eps_dis_ls, bins=100)
-    # plt.show()
+    # # eps_dis_ls, eps_dis1, eps_dis2 = compute_flow_timestep(pipeline=pipeline, timestep=1, batch_size=512, image=image)
+    # # print(f"Moment: {eps_dis1}, {eps_dis2}")
+    # # print(f"eps_dis_ls: {eps_dis_ls.shape}")
+    # # plt.hist(eps_dis_ls, bins=100)
+    # # plt.show()
     
-    # cifar10_real_images: str = "real_images/cifar10"
-    # cifar10_real_images: str = "real_images/celeba_hq_256"
-    # out_dist_real_images: str = "real_images/out_dist"
-    # fake_images: str = "fake_images/cifar10_ddpm"
-    # fake_images: str = "fake_images/celeba_hq_256_ddpm"
+    # # cifar10_real_images: str = "real_images/cifar10"
+    # # cifar10_real_images: str = "real_images/celeba_hq_256"
+    # # out_dist_real_images: str = "real_images/out_dist"
+    # # fake_images: str = "fake_images/cifar10_ddpm"
+    # # fake_images: str = "fake_images/celeba_hq_256_ddpm"
     
-    # plot_flow_timesteps(pipeline=pipeline, real_images=cifar10_real_images, out_dist_real_images=out_dist_real_images, fake_images=fake_images, sample_num=100, batch_size=1024, timesteps=timesteps)
-    # plot_gaussian_reconstruction(pipeline=pipeline, real_images=cifar10_real_images, out_dist_real_images=out_dist_real_images, fake_images=fake_images, sample_num=100, batch_size=1024, noise_scale=args.ns, n=args.n)
-    plot_direct_reconst(name_prefix=md.name_prefix, pipeline=pipeline, real_images=md.real_images, out_dist_real_images=md.out_dist_real_images, fake_images=md.fake_images, sample_num=100, batch_size=1024, timestep=args.ts, n=args.n)
+    # # plot_flow_timesteps(pipeline=pipeline, real_images=cifar10_real_images, out_dist_real_images=out_dist_real_images, fake_images=fake_images, sample_num=100, batch_size=1024, timesteps=timesteps)
+    # # plot_gaussian_reconstruction(pipeline=pipeline, real_images=cifar10_real_images, out_dist_real_images=out_dist_real_images, fake_images=fake_images, sample_num=100, batch_size=1024, noise_scale=args.ns, n=args.n)
+    # plot_direct_reconst(name_prefix=md.name_prefix, pipeline=pipeline, real_images=md.real_images, out_dist_real_images=md.out_dist_real_images, fake_images=md.fake_images, sample_num=100, batch_size=1024, timestep=args.ts, n=args.n)
+    
+    
+    detect_fourier_lora()
 
 # %%

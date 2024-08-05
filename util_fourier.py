@@ -771,7 +771,8 @@ def fft_nd(x: torch.Tensor, dim: Union[Tuple[int], int]=None, nd: int=None):
     
     # print(f"x_fft: {torch.fft.fftshift(x_fft)}, .abs().log(): {torch.fft.fftshift(x_fft).abs().log()}")
     # print(f"x_fft: {torch.fft.fftshift(x_fft).isfinite().all()}, .abs().log(): {torch.fft.fftshift(x_fft).abs().log().isfinite().all()}")
-    return torch.fft.fftshift(x_fft).abs().log()
+    # return torch.fft.fftshift(x_fft).abs().log()
+    return torch.fft.fftshift(x_fft).abs()
 
 def get_freq_circle(shape: Union[Tuple[int], int], in_diamiter: int, out_diamiter: int):
     return nd_circle(shape=shape, diamiter=out_diamiter) - nd_circle(shape=shape, diamiter=in_diamiter)

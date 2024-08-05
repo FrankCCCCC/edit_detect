@@ -1,5 +1,5 @@
 import os
-from typing import Union, Tuple
+from typing import Union, Tuple, List, Dict, Set
 import pickle
 import pathlib
 import glob
@@ -13,9 +13,11 @@ from safetensors.torch import save_file, safe_open
 from diffusers import StableDiffusionPipeline, DiffusionPipeline, DDPMPipeline, DDIMScheduler, DDIMInverseScheduler
 import bz2file as bz2
 
-def list_all_images(root: Union[str, os.PathLike, pathlib.PurePath], image_exts: list[str]=['png', 'jpg', 'jpeg', 'webp'], ext_case_sensitive: bool=False):
-    img_ls_all: list[str] = glob.glob(f"{str(root)}/**", recursive=True)
-    img_ls_filtered: list[str] = []
+from util_fourier import filtered_by_freq
+
+def list_all_images(root: Union[str, os.PathLike, pathlib.PurePath], image_exts: List[str]=['png', 'jpg', 'jpeg', 'webp'], ext_case_sensitive: bool=False):
+    img_ls_all: List[str] = glob.glob(f"{str(root)}/**", recursive=True)
+    img_ls_filtered: List[str] = []
     # print(f"img_ls_all: {len(img_ls_all)}")
     for img in img_ls_all:
         img_path: str = str(img)
@@ -73,7 +75,7 @@ def set_generator(generator: Union[int, torch.Generator]) -> torch.Generator:
 def mse(x0: torch.Tensor, pred_x0: torch.Tensor) -> torch.Tensor:
     return ((x0 - pred_x0) ** 2).sqrt().mean(list(range(x0.dim()))[1:])
 
-def mse_series(x0: torch.Tensor, pred_orig_images: list[torch.Tensor]):
+def mse_series(x0: torch.Tensor, pred_orig_images: List[torch.Tensor]):
     # pred_orig_images_stck: torch.Tensor = torch.stack(pred_orig_images, dim=0)
     t: int = len(pred_orig_images)
     n: int = pred_orig_images.shape[1]
@@ -85,7 +87,7 @@ def mse_series(x0: torch.Tensor, pred_orig_images: list[torch.Tensor]):
     
     return residual
 
-def mse_traj(pred_orig_images: list[torch.Tensor]):
+def mse_traj(pred_orig_images: List[torch.Tensor]):
     # pred_orig_images_stck: torch.Tensor = torch.stack(pred_orig_images, dim=0)
     t: int = len(pred_orig_images)
     n: int = pred_orig_images.shape[1]
@@ -97,7 +99,7 @@ def mse_traj(pred_orig_images: list[torch.Tensor]):
     
     return residual
 
-def center_mse_series(pred_orig_images: list[torch.Tensor]):
+def center_mse_series(pred_orig_images: List[torch.Tensor]):
     # pred_orig_images_stck: torch.Tensor = torch.stack(pred_orig_images, dim=0)
     t: int = len(pred_orig_images)
     n: int = pred_orig_images.shape[1]
@@ -108,6 +110,59 @@ def center_mse_series(pred_orig_images: list[torch.Tensor]):
     # print(f"residual: {residual.shape}")
     
     return residual
+
+class DistanceFn:
+    NORM_L1 = "NORM_L1"
+    NORM_L2 = "NORM_L2"
+    NORM_HUBER = "NORM_HUBER"
+    REDUCE_MEAN = "REDUCE_MEAN"
+    REDUCE_SUM = "REDUCE_SUM"
+    # EMBED_FFT_1D
+    # EMBED_FFT_ND
+    
+    @staticmethod
+    def norm_fn(loss_type: str):
+        reduction = 'none'
+        if loss_type == DistanceFn.NORM_L1:
+            return partial(F.l1_loss, reduction=reduction)
+        elif loss_type == DistanceFn.NORM_L2:
+            return partial(F.mse_loss, reduction=reduction)
+        elif loss_type == DistanceFn.NORM_HUBER:
+            return partial(F.smooth_l1_loss, reduction=reduction)
+        else:
+            raise NotImplementedError()
+    @staticmethod
+    def reduce_fn(reduce_type: str, dim: Union[int, Tuple[int], List[int]]=None, nd: int=None):
+        if dim != None and nd != None:
+            raise ValueError("Arguement dim or nd should not be None inthe mean time")
+        
+        def get_dim(x, dim, nd):
+            if nd != None:
+                return list(range(len(x.shape)))[nd:]
+            else:
+                return dim
+            
+        if reduce_type == DistanceFn.REDUCE_MEAN:
+            return lambda x: torch.mean(x, dim=get_dim(x=x, dim=dim, nd=nd))
+        elif reduce_type == DistanceFn.REDUCE_SUM:
+            return lambda x: torch.sum(x, dim=get_dim(x=x, dim=dim, nd=nd))
+        else:
+            raise NotImplementedError()
+    @staticmethod
+    def embed_fft_1d_fn(thres: float, dim: Union[int, Tuple[int], List[int]]=None, nd: int=-3):
+        if (dim == None and nd == None) or (dim != None and nd != None):
+            raise ValueError("Either arguement dim or nd should not be None")
+        
+        def res_fn(x):
+            if nd != None:
+                used_dim = list(range(len(x.shape)))[nd:]
+                usded_out_dimameter = max(list(x.shape[nd:])) * thres
+            elif dim != None:
+                used_dim = dim
+                usded_out_dimameter = max([x.shape[d] for d in dim]) * thres
+            return partial(filtered_by_freq, dim=used_dim, in_diamiter=0, out_diamiter=usded_out_dimameter)
+        return res_fn
+        
 
 class Recorder:
     EMPTY_HANDLER_SKIP: str = "SKIP"
@@ -120,12 +175,12 @@ class Recorder:
         if not key in self.__data__:
             self.__data__[key] = {}
     
-    def __handle_values__(self, values, indices: Union[int, float, list[Union[int, float]], torch.Tensor, slice]):
+    def __handle_values__(self, values, indices: Union[int, float, List[Union[int, float]], torch.Tensor, slice]):
         if isinstance(indices, int) or isinstance(indices, float):
             return [values]
         return values
     
-    def __handle_indices__(self, indices: Union[int, float, list[Union[int, float]], torch.Tensor, slice], indice_max_length: int=None):
+    def __handle_indices__(self, indices: Union[int, float, List[Union[int, float]], torch.Tensor, slice], indice_max_length: int=None):
         if indice_max_length is None:
             indice_max_length = len(self.__data__)
         if isinstance(indices, slice):
@@ -134,10 +189,10 @@ class Recorder:
             indices = [indices]
         return indices
     
-    def __handle_values_indices__(self, values, indices: Union[int, float, list[Union[int, float]], torch.Tensor, slice], indice_max_length: int=None):
+    def __handle_values_indices__(self, values, indices: Union[int, float, List[Union[int, float]], torch.Tensor, slice], indice_max_length: int=None):
         return self.__handle_values__(values=values, indices=indices), self.__handle_indices__(indices=indices, indice_max_length=indice_max_length)
     
-    def __update_by_indices__(self, key: Union[str, int], values, indices: Union[int, float, list[Union[int, float]], torch.Tensor, slice], err_if_replace: bool=False, replace: bool=False):
+    def __update_by_indices__(self, key: Union[str, int], values, indices: Union[int, float, List[Union[int, float]], torch.Tensor, slice], err_if_replace: bool=False, replace: bool=False):
         if err_if_replace and replace:
             raise ValueError(f"Arguement err_if_replace and replace shouldn't be true at the same time.")
         
@@ -150,7 +205,7 @@ class Recorder:
             else:
                 self.__data__[key][idx] = values[i]
     
-    def update_by_key(self, key: Union[str, int], values, indices: Union[int, float, list[Union[int, float]], torch.Tensor, slice], indice_max_length: int=None, err_if_replace: bool=False, replace: bool=False) -> None:
+    def update_by_key(self, key: Union[str, int], values, indices: Union[int, float, List[Union[int, float]], torch.Tensor, slice], indice_max_length: int=None, err_if_replace: bool=False, replace: bool=False) -> None:
         if err_if_replace and replace:
             raise ValueError(f"Arguement err_if_replace and replace shouldn't be true at the same time.")
         self.__init_data_by_key__(key=key)
@@ -162,7 +217,7 @@ class Recorder:
             raise ValueError(f"values and indices should have the same length.")
         self.__update_by_indices__(key=key, values=values, indices=indices, err_if_replace=err_if_replace, replace=replace)
         
-    def get_by_key(self, key: Union[str, int], indices: Union[int, float, list[Union[int, float]], torch.Tensor, slice], indice_max_length: int=None, empty_handler: str=EMPTY_HANDLER_DEFAULT, default_val=None):
+    def get_by_key(self, key: Union[str, int], indices: Union[int, float, List[Union[int, float]], torch.Tensor, slice], indice_max_length: int=None, empty_handler: str=EMPTY_HANDLER_DEFAULT, default_val=None):
         self.__init_data_by_key__(key=key)
         
         indices = self.__handle_indices__(indices=indices, indice_max_length=indice_max_length)
@@ -185,7 +240,7 @@ class TensorDict:
         self.__max_size__: int = max_size
         
         # self.__embed__: torch.nn.Embedding = torch.nn.Embedding(num_embeddings=self.__max_size__, embedding_dim=1)
-        self.__data__: dict[list, any] = {}
+        self.__data__: Dict[list, any] = {}
         
     def __get_key__(self, key: torch.Tensor) -> int:
         # print(f"key: {hash(tuple(key.reshape(-1).tolist()))}")
@@ -254,7 +309,7 @@ class DirectRecorder:
         if not self.__top_dict__[top_key].is_key_exist(key=sub_key):
             self.__top_dict__[top_key][sub_key] = {DirectRecorder.SEQ_KEY: Recorder(), DirectRecorder.RECONST_KEY: None}
     
-    def update_seq(self, top_key: torch.Tensor, sub_key: torch.Tensor, values, indices: Union[int, float, list[Union[int, float]], torch.Tensor, slice], indice_max_length: int=None, err_if_replace: bool=False, replace: bool=False):
+    def update_seq(self, top_key: torch.Tensor, sub_key: torch.Tensor, values, indices: Union[int, float, List[Union[int, float]], torch.Tensor, slice], indice_max_length: int=None, err_if_replace: bool=False, replace: bool=False):
         self.__init_key__(top_key, sub_key)
         self.__top_dict__[top_key][sub_key][DirectRecorder.SEQ_KEY].update_by_key(key='seq', values=values, indices=indices, indice_max_length=indice_max_length, err_if_replace=err_if_replace, replace=replace)        
     
@@ -342,7 +397,7 @@ class SafetensorRecorder(DirectRecorder):
         return self.__data__
     
     def __unpack_internal__(self, input: dict) -> None:
-        self.__data__: dict[str, torch.Tensor] = input
+        self.__data__: Dict[str, torch.Tensor] = input
         
     def update_seq(self, values: torch.Tensor):
         if SafetensorRecorder.SEQ_KEY in self.__data__:
@@ -400,8 +455,8 @@ class SafetensorRecorder(DirectRecorder):
         
     def batch_update(self, images: torch.Tensor, noisy_images: torch.Tensor, reconsts: torch.Tensor, noises: torch.Tensor, timestep: int, label: str, seqs: torch.Tensor=None, residuals: torch.Tensor=None, traj_residuals: torch.Tensor=None):
         n: int = len(images)
-        labels: list[str] = [label] * n
-        tss: list[int] = [timestep] * n
+        labels: List[str] = [label] * n
+        tss: List[int] = [timestep] * n
         if seqs is None:
             seqs = [None] * n
         if residuals is None:
@@ -546,7 +601,7 @@ class ModelDataset():
         return [ModelDataset.get_path(ModelDataset.real_images_dir, real_fodler), ModelDataset.get_path(ModelDataset.fake_images_dir, fake_folder)]
     
     def prep_model_dataset(self, model: str, dataset: str, out_dist: str):
-        res: list[str] = None
+        res: List[str] = None
         if model == ModelDataset.MD_DDPM:
             if dataset == ModelDataset.DS_CIFAR10:
                 res = [ModelDataset.MDID_GOOGLE_DDPM_CIFAR10_32] + self.__prep_real_fake__(real_fodler="cifar10", fake_folder="cifar10_ddpm")
@@ -573,18 +628,18 @@ class ModelDataset():
     def __model_dataset_name_fn__(model: str, dataset: str):
         return f"{dataset}_{model}"
     
-    def unroll_gen_dataset_combination(self, combinations: Union[str, list[str], dict[str, str]]):
+    def unroll_gen_dataset_combination(self, combinations: Union[str, List[str], Dict[str, str]]):
         if combinations is None:
             return []
         elif isinstance(combinations, str):
             return [combinations]
         elif isinstance(combinations, list):
-            unrolled_combs: list[str] = []
+            unrolled_combs: List[str] = []
             for comb in combinations:
                 unrolled_combs = unrolled_combs + ModelDataset.unroll_dataset_combination(combinations=comb)
             return unrolled_combs
         elif isinstance(combinations, dict):
-            unrolled_combs: list[str] = []
+            unrolled_combs: List[str] = []
             all_models = self.filter_md_by(archs=None)
             for key, val in combinations.items():
                 if key in all_models:
@@ -594,17 +649,17 @@ class ModelDataset():
             return combinations
         
     @staticmethod
-    def make_grid_comb(models: Union[str, list[str]], datasets: Union[str, list[str]]) -> dict[str, list[str]]:
+    def make_grid_comb(models: Union[str, List[str]], datasets: Union[str, List[str]]) -> Dict[str, List[str]]:
         if isinstance(models, str):
             models = [models]
         if isinstance(datasets, str):
             datasets = [datasets]
-        comb: dict[str, list[str]] = {}
+        comb: Dict[str, List[str]] = {}
         for model in models:
             comb[model] = datasets
         return comb
         
-    def set_model_dataset(self, model: str, dataset: str, out_dist: str, real: Union[str, list[str]]=None, fake: Union[str, list[str]]=None):
+    def set_model_dataset(self, model: str, dataset: str, out_dist: str, real: Union[str, List[str]]=None, fake: Union[str, List[str]]=None):
         self.__model__, self.__real_images__, self.__fake_images__, self.__out_dist_real_images__ = self.prep_model_dataset(model=model, dataset=dataset, out_dist=out_dist)
         print(f"Model: {self.__model__}, Real: {self.__real_images__}, Fake: {self.__fake_images__}, Out Dist: {self.__out_dist_real_images__}")
         return self
@@ -650,23 +705,23 @@ class ModelDataset():
     def STATIC_VARS(self):
         return [attr for attr in dir(ModelDataset) if not callable(getattr(ModelDataset, attr)) and not attr.startswith("__")]
     
-    def __scan_by__(self, var: str, conds: Union[int, list[int], set[int], str, list[str], set[str], None]=None):
+    def __scan_by__(self, var: str, conds: Union[int, List[int], Set[int], str, List[str], Set[str], None]=None):
         if conds is None or (isinstance(conds, list) and len(conds) == 0) or (isinstance(conds, set) and len(conds) == 0):
             return True
         elif isinstance(conds, int) or isinstance(conds, str):
             conds = [conds]
         # else:
-        #     raise TypeError(f"Arguement conds is not supported, should be Union[int, list[int], set[int], str, list[str], set[str]], not {type(conds)}")
+        #     raise TypeError(f"Arguement conds is not supported, should be Union[int, List[int], Set[int], str, List[str], Set[str]], not {type(conds)}")
             
         for cond in conds:
             if f'_{cond}' in var:
                 return True
         return False
     
-    def __scan_ds_by__(self, datasets: Union[int, list[int], set[int], None]=None, sizes: Union[int, list[int], set[int], None]=None):
+    def __scan_ds_by__(self, datasets: Union[int, List[int], Set[int], None]=None, sizes: Union[int, List[int], Set[int], None]=None):
         if isinstance(sizes, int):
             sizes = [sizes]
-        res: list[str] = []
+        res: List[str] = []
         key: str = 'DS_'
         for var in self.STATIC_VARS:
             if var[:len(key)] == key:
@@ -674,10 +729,10 @@ class ModelDataset():
                     res.append(getattr(self, var))
         return list(set(res))
     
-    def __scan_md_by__(self, archs: Union[str, list[str], set[str], None]=None):
+    def __scan_md_by__(self, archs: Union[str, List[str], Set[str], None]=None):
         if isinstance(sizes, int):
             sizes = [sizes]
-        res: list[str] = []
+        res: List[str] = []
         key: str = 'MD_'
         for var in self.STATIC_VARS:
             if var[:len(key)] == key:
@@ -685,10 +740,10 @@ class ModelDataset():
                     res.append(getattr(self, var))
         return list(set(res))
     
-    def __scan_mdid_by__(self, archs: Union[str, list[str], set[str], None]=None, datasets: Union[str, list[str], set[str], None]=None, sizes: Union[int, list[int], set[int], None]=None):
+    def __scan_mdid_by__(self, archs: Union[str, List[str], Set[str], None]=None, datasets: Union[str, List[str], Set[str], None]=None, sizes: Union[int, List[int], Set[int], None]=None):
         if isinstance(sizes, int):
             sizes = [sizes]
-        res: list[str] = []
+        res: List[str] = []
         key: str = 'MDID_'
         for var in self.STATIC_VARS:
             if var[:len(key)] == key:
@@ -721,16 +776,16 @@ class ModelDataset():
     def ALL_MD(self):
         return self.__scan_md_by__(sizes=None)
     
-    def filter_ds_by(self, datasets: Union[str, list[str], set[str], None]=None, sizes: Union[int, list[int], set[int], None]=None):
+    def filter_ds_by(self, datasets: Union[str, List[str], Set[str], None]=None, sizes: Union[int, List[int], Set[int], None]=None):
         return self.__scan_ds_by__(datasets=datasets, sizes=sizes)
     
-    def filter_md_by(self, archs: Union[str, list[str], set[str], None]=None):
+    def filter_md_by(self, archs: Union[str, List[str], Set[str], None]=None):
         return self.__scan_md_by__(archs=archs)
     
-    def filter_mdid_by(self, archs: Union[str, list[str], set[str], None]=None, datasets: Union[str, list[str], set[str], None]=None, sizes: Union[int, list[int], set[int], None]=None):
+    def filter_mdid_by(self, archs: Union[str, List[str], Set[str], None]=None, datasets: Union[str, List[str], Set[str], None]=None, sizes: Union[int, List[int], Set[int], None]=None):
         return self.__scan_mdid_by__(archs=archs, datasets=datasets, sizes=sizes)
 
-def nd_cicle(shape: Union[tuple[int], int], diamiter: int):
+def nd_cicle(shape: Union[Tuple[int], int], diamiter: int):
     '''
     Input:
     shape    : tuple (height, width)
@@ -745,13 +800,13 @@ def nd_cicle(shape: Union[tuple[int], int], diamiter: int):
     center: torch.Tensor = torch.tensor(shape) / 2.0
     
     # Generate Grids
-    idx_list: list[torch.Tensor] = []
+    idx_list: List[torch.Tensor] = []
     for d in shape:
         idx_list.append(torch.arange(d))
-    grids: list[torch.Tensor] = torch.meshgrid(idx_list, indexing='ij')
+    grids: List[torch.Tensor] = torch.meshgrid(idx_list, indexing='ij')
     
     # Compute distance to center per dimension
-    grid_residuals: list[torch.Tensor] = []
+    grid_residuals: List[torch.Tensor] = []
     for grid, c in zip(grids, center):
         grid_residuals.append((grid - c) ** 2)
         
@@ -759,7 +814,7 @@ def nd_cicle(shape: Union[tuple[int], int], diamiter: int):
 
     return mask.int()
 
-def fft_nd(x: torch.Tensor, dim: Union[tuple[int], int]=None, nd: int=None):
+def fft_nd(x: torch.Tensor, dim: Union[Tuple[int], int]=None, nd: int=None):
     if (dim is not None) and (nd is not None):
         raise ValueError(f"Arguements dim and nd can not be used at the same time.")
     if dim is not None:
@@ -773,25 +828,25 @@ def fft_nd(x: torch.Tensor, dim: Union[tuple[int], int]=None, nd: int=None):
     print(f"x_fft: {torch.fft.fftshift(x_fft).isfinite().all()}, .abs().log(): {torch.fft.fftshift(x_fft).abs().log().isfinite().all()}")
     return torch.fft.fftshift(x_fft).abs().log()
 
-def get_freq_circle(shape: Union[tuple[int], int], in_diamiter: int, out_diamiter: int):
+def get_freq_circle(shape: Union[Tuple[int], int], in_diamiter: int, out_diamiter: int):
     return nd_cicle(shape=shape, diamiter=out_diamiter) - nd_cicle(shape=shape, diamiter=in_diamiter)
 
-def get_freq_circle_all(shape: Union[tuple[int], int]):
+def get_freq_circle_all(shape: Union[Tuple[int], int]):
     n: int = max(shape)
-    freq_circles: list[torch.Tensor] = []
+    freq_circles: List[torch.Tensor] = []
     for i in range(n):
         freq_circles.append(get_freq_circle(shape=shape, in_diamiter=i, out_diamiter=i + 1))
         print(f"Any < 0: {(get_freq_circle(shape=shape, in_diamiter=i, out_diamiter=i + 1) < 0).any()}")
     return freq_circles
 
-def filtered_by_freq_all(x: torch, dim: Union[tuple[int], int]):
+def filtered_by_freq_all(x: torch, dim: Union[Tuple[int], int]):
     if isinstance(dim, int):
         dim = [dim]
     filter_shape = tuple(x.shape[i] for i in dim)
-    all_freq_circles: list[torch.Tensor] = get_freq_circle_all(shape=filter_shape)
+    all_freq_circles: List[torch.Tensor] = get_freq_circle_all(shape=filter_shape)
     
     print(f"x: {x.shape}")
-    def reshape_repeat(circle: torch.Tensor, target_shape: Union[tuple[int], list[int]], dim: Union[tuple[int], int]):
+    def reshape_repeat(circle: torch.Tensor, target_shape: Union[Tuple[int], List[int]], dim: Union[Tuple[int], int]):
         circle_reshape = [1] * len(target_shape)
         circle_repeat = list(target_shape)
         for i, elem in enumerate(dim):
@@ -802,14 +857,14 @@ def filtered_by_freq_all(x: torch, dim: Union[tuple[int], int]):
     
     return [fft_nd(x=x, dim=dim) * reshape_repeat(circle=circle, target_shape=x.shape, dim=dim) for circle in all_freq_circles]
 
-def filtered_by_freq(x: torch, dim: Union[tuple[int], int], in_diamiter: int, out_diamiter: int):
+def filtered_by_freq(x: torch, dim: Union[Tuple[int], int], in_diamiter: int, out_diamiter: int):
     if isinstance(dim, int):
         dim = [dim]
     filter_shape = tuple(x.shape[i] for i in dim)
     freq_circle: torch.Tensor = get_freq_circle(shape=filter_shape, in_diamiter=in_diamiter, out_diamiter=out_diamiter)
     
     print(f"x: {x.shape}")
-    def reshape_repeat(circle: torch.Tensor, target_shape: Union[tuple[int], list[int]], dim: Union[tuple[int], int]):
+    def reshape_repeat(circle: torch.Tensor, target_shape: Union[Tuple[int], List[int]], dim: Union[Tuple[int], int]):
         circle_reshape = [1] * len(target_shape)
         circle_repeat = list(target_shape)
         for i, elem in enumerate(dim):
@@ -820,7 +875,7 @@ def filtered_by_freq(x: torch, dim: Union[tuple[int], int], in_diamiter: int, ou
     
     return fft_nd(x=x, dim=dim) * reshape_repeat(circle=freq_circle, target_shape=x.shape, dim=dim)
 
-def freq_magnitude(filtered_freqs: Union[list[torch.Tensor], torch.Tensor], dim: Union[tuple[int], int], method: str='mean'):
+def freq_magnitude(filtered_freqs: Union[List[torch.Tensor], torch.Tensor], dim: Union[Tuple[int], int], method: str='mean'):
     METHOD_SUM: str = 'sum'
     METHOD_MEAN: str = 'mean'
     
@@ -835,7 +890,7 @@ def freq_magnitude(filtered_freqs: Union[list[torch.Tensor], torch.Tensor], dim:
     else:
         raise ValueError(f"Arguement method cannot be {method}, should be {METHOD_SUM} or {METHOD_MEAN}")
 
-def fft_nd_to_1d(x: torch.Tensor, dim: Union[tuple[int], int]=None, nd: int=None):
+def fft_nd_to_1d(x: torch.Tensor, dim: Union[Tuple[int], int]=None, nd: int=None):
     if (dim is not None) and (nd is not None):
         raise ValueError(f"Arguements dim and nd can not be used at the same time.")
     if dim is not None:
@@ -900,7 +955,7 @@ if __name__ == "__main__":
                         transforms.ConvertImageDtype(torch.float),
                         # transforms.Lambda(lambda x: normalize(vmin_in=0, vmax_in=1, vmin_out=, vmax_out=, x=x)),
                         ])
-    imgs: list[torch.Tensor] = []
+    imgs: List[torch.Tensor] = []
     for i in range(n):
         # image_file: str = f'real_images/celeba_hq_256_jpg/{i}.jpg'
         image_file: str = f'fake_images/celeba_hq_256_ddpm/image{i}.jpg'

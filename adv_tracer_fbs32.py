@@ -23,7 +23,6 @@ import wandb
 from matplotlib import pyplot as plt
 from safetensors.torch import save_file, safe_open
 import json 
-from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 
 from diffusers import ConsistencyModelPipeline, CMStochasticIterativeScheduler
 from util import list_all_images, set_generator, normalize
@@ -58,8 +57,6 @@ class MultiDataset(Dataset):
         else:
             raise TypeError(f"Arguement src should not be {type(src)}, it should be Union[torch.Tensor, str, os.PathLike, pathlib.PurePath, List[Union[torch.Tensor, Image.Image, str, os.PathLike, pathlib.PurePath]]]")
         
-        # print(f"self.__src__: {len(self.__src__)}")
-        
         self.__repeat__: int = repeat
         self.__repeat_type__: str = repeat_type
         self.__noise_map_type__: str = noise_map_type
@@ -83,7 +80,6 @@ class MultiDataset(Dataset):
                 return data * self.__repeat__
             else:
                 raise ValueError(f"No such repeat type, {self.__repeat_type__}, should be {MultiDataset.REPEAT_BY_INPLACE} or {MultiDataset.REPEAT_BY_APPEND}")
-        return data
     
     def __build_noise__(self):
         element_shape: List[int] = list(self.__loader__(data=self.__src__[0]).shape)
@@ -305,7 +301,7 @@ class Optimizer:
 class LossFn:
     METRIC_L1: str = "L1"
     METRIC_L2: str = "L2"
-    # METRIC_L2_PER_ENTRY: str = "L2_PER_ENTRY"
+    METRIC_L2_PER_ENTRY: str = "L2_PER_ENTRY"
     METRIC_FOURIER: str = "FOURIER"
     METRIC_SSIM: str = "SSIM"
     METRIC_LPIPS: str = "LPIPS"
@@ -314,16 +310,12 @@ class LossFn:
     def mse(x0: torch.Tensor, pred_x0: torch.Tensor, reduction: str) -> torch.Tensor:
         return ((x0 - pred_x0) ** 2).sqrt().mean(list(range(x0.dim()))[1:])
     
-    @staticmethod
     def get_loss_fn(metric: str, reduction: str='mean'):
         if metric == LossFn.METRIC_L1:
-            if reduction == 'mean':
-                criterion = lambda x, y: torch.nn.L1Loss(reduction='none')(x, y).mean(list(range(x.dim()))[1:])
-            elif reduction == 'sum':
-                criterion = lambda x, y: torch.nn.L1Loss(reduction='none')(x, y).sum(list(range(x.dim()))[1:])
-            else:
-                criterion = lambda x, y: torch.nn.L1Loss(reduction='none')(x, y)
+            criterion = torch.nn.L1Loss(reduction=reduction)
         elif metric == LossFn.METRIC_L2:
+            criterion = torch.nn.MSELoss(reduction=reduction)
+        elif metric == LossFn.METRIC_L2_PER_ENTRY:
             if reduction == 'mean':
                 criterion = lambda x, y: torch.nn.MSELoss(reduction='none')(x, y).mean(list(range(x.dim()))[1:])
             elif reduction == 'sum':
@@ -439,14 +431,6 @@ def batchify(data, batch_size: int):
         res.append(data[i:i + batch_size])
     return res
 
-def get_lr(optim, lr_sched=None):
-    if optim is not None:
-        return optim.param_groups[0]['lr']
-    elif lr_sched is not None:
-        return lr_sched.get_last_lr()[0]
-    else:
-        raise ValueError(f"Arguement optim and lr_sched should not be None in the same time")
-
 def sampling(pipeline, num: int, path: str, num_inference_steps: int=1, prompts: List=None, prompts_arg_name: str=None, batch_size: int=32, generator: torch.Generator=None):
     if prompts is None or len(prompts) == 0:
         used_prompts: List = [None for i in range(num)]
@@ -514,12 +498,9 @@ class Config:
     vmax_out: int = 1
     model_type: str = ModelSched.MD_CLASS_CM
     model_id: str = ModelSched.MD_NAME_CD_L2_IMAGENET64
-    loss_metric: str = LossFn.METRIC_L2
+    loss_metric: str = LossFn.METRIC_L2_PER_ENTRY
     optim_type: str = Optimizer.OPTIM_ADAM
     lr: float = 0.01
-    num_warmup_steps: int = None
-    num_training_steps: int = None
-    num_cycles: int = 5
     num_classes: int = 1000
     sample_num: int = 3000
     path: str = os.path.join("fake_images", model_id)
@@ -527,7 +508,7 @@ class Config:
     prompts: List[int] = None
     # prompts: List[int] = None
     prompts_arg_name: str = 'class_labels'
-    batch_size: int = None
+    batch_size: int = 32
     device: Union[str, torch.device] = 'cuda:3'
     seed: int = 0
     max_iter: int = 1000
@@ -536,20 +517,11 @@ class Config:
     training_sample_folder: str = 'training_samples'
     
     def __naming_fn__(self):
-        return f"res-{self.ds_root.replace('images/', '')}-{self.model_id}-{self.loss_metric}-lr{self.lr}-{self.loss_metric}-it{self.max_iter}-lrnc{self.num_cycles}-bs{self.batch_size}"
+        return f"res-{self.ds_root.replace('images/', '')}-{self.model_id}-{self.loss_metric}-lr{self.lr}-bs{self.batch_size}"
     
     def __post_init__(self):
-        self.prompts = [i for i in range(self.num_classes)]
-        # assert self.batch_size == None
-        self.batch_size = self.repeat
-        self.num_warmup_steps = int(self.max_iter * 0.1)
-        self.num_training_steps = self.max_iter
-        
-        # Should be last one
-        self.name = f"{self.__naming_fn__()}"
-        
-    def re_init__(self):
-        self.__post_init__()
+        setattr(self, 'prompts', [i for i in range(self.num_classes)])
+        setattr(self, 'name', f"{self.__naming_fn__()}")
         
     # def make_dir(self):
     #     os.makedirs(self.name, exist_ok=True)
@@ -564,40 +536,8 @@ def Dataclass2Dict(data):
             res[field] = getattr(data, field)
     return res
     
-def parse_config():
-    config: Config = Config()
-    
-    parser = argparse.ArgumentParser(description="Simple example of a training script.")
-    parser.add_argument("--project", "-pj", type=str, default=None, required=True, help="Name of the project")
-    parser.add_argument("--ds_root", "-dsr", type=str, default=None, required=True, help="Root of dataset")
-    parser.add_argument("--repeat", "-r", type=int, default=None, required=True, help="The repetition of data points")
-    parser.add_argument("--model_type", "-mt", type=str, default=None, required=True, help="The detection model type")
-    parser.add_argument("--model_id", "-mi", type=str, default=None, required=True, help="The detection model ID")
-    parser.add_argument("--loss_metric", "-lm", type=str, default=None, required=True, help="The distance metric between ground-truth and predicted image")
-    parser.add_argument("--lr", "-lr", type=float, default=None, required=True, help="The learning rate of optimizer")
-    parser.add_argument("--max_iter", "-it", type=int, default=None, required=True, help="The maximum iteration number")
-    parser.add_argument("--num_cycles", "-nc", type=int, default=None, required=True, help="The nnumber of learning rate scheduler cycle")
-    parser.add_argument("--device", "-d", type=str, default=None, required=True, help="The computing unit that is used")
-    
-    args = parser.parse_args()
-    
-    config.project = args.project
-    config.ds_root = args.ds_root
-    config.repeat = args.repeat
-    config.model_type = args.model_type
-    config.model_id = args.model_id
-    config.loss_metric = args.loss_metric
-    config.lr = args.lr
-    config.max_iter = args.max_iter
-    config.num_cycles = args.num_cycles
-    config.device = args.device
-    
-    config.re_init__()
-    return config
-    
 def tmp_train():
-    config: Config = parse_config()
-    # config: Config = Config()
+    config: Config = Config()
     accelerator = Accelerator(log_with=["wandb", LoggerType.TENSORBOARD])
     
     
@@ -606,9 +546,7 @@ def tmp_train():
     pipe, unet, vae, scheduler = ModelSched.get_model_sched(model_type=config.model_type, model_id=config.model_id)
     loss_fn = LossFn.get_loss_fn(metric=config.loss_metric)
     pipe, unet, vae, scheduler, loss_fn = ModelSched.all_to_device(pipe, unet, vae, scheduler, loss_fn, device=config.device)
-    print(f"Compiling Models...")
     pipe.unet, unet, vae = ModelSched.all_compile(pipe.unet, unet, vae)
-    print(f"Models Compiled")
     
     image_size: Union[int, List[int], Tuple[int]] = pipe.unet.config.sample_size
     
@@ -622,14 +560,13 @@ def tmp_train():
         json.dump(Dataclass2Dict(data=config), f, indent=4)
     try:
         for batch_idx, batch in enumerate(dl):
-            if batch_idx >= 200:
+            if batch_idx >= 500:
                 break        
             
             img, noise, img_id = batch
             img, noise = ModelSched.all_to_device(img, noise, device=config.device)
             noise = Optimizer.get_tainable_param(noise)
             optim = Optimizer.optim_generator(name=config.optim_type, lr=config.lr)([noise])
-            lr_sched = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer=optim, num_warmup_steps=config.num_warmup_steps, num_training_steps=config.num_training_steps, num_cycles=config.num_cycles)
             
             print(f"Batch {batch_idx}")
             
@@ -639,7 +576,6 @@ def tmp_train():
             
             loss_log = []
             loss_vec_log = []
-            lr_log = []
             step_log = []
             sample_log = []
             for step in tqdm(range(config.max_iter)):
@@ -650,8 +586,6 @@ def tmp_train():
                 optim.zero_grad()
                 loss.backward()
                 optim.step()
-                if lr_sched is not None:
-                    lr_sched.step()
                 
                 progress_bar.update(1)
                 logs = {"AvgLoss": loss.detach().item()}
@@ -660,23 +594,13 @@ def tmp_train():
                 loss_log.append(loss.detach().cpu().item())
                 loss_vec_log.append(loss_vec.detach().cpu())
                 step_log.append(step)
-                lr_log.append(get_lr(optim=optim, lr_sched=lr_sched))
                 sample_log.append(ds.tensor2imgs(auto_make_grid(pred[:config.grid_size]), cnvt_range=False, is_detach=True, to_device='cpu'))
                 # print(f"noise: {noise.shape}, min: {noise.min()}, max: {noise.max()}")
                 
                 torch.cuda.empty_cache()
                     
-            fig, ax = plt.subplots(2, 1)
-            ax[0].plot(step_log, loss_log, label='Loss', color='b')
-            ax[0].set_title("Loss V.S Step")
-            ax[0].set_xlabel("Step")
-            ax[0].legend()
-            
-            ax[1].plot(step_log, lr_log, label='LR', color='r')
-            ax[1].set_title("LR V.S Step")
-            ax[1].set_xlabel("Step")
-            ax[1].legend()
-            
+            fig, ax = plt.subplots()
+            ax.plot(step_log, loss_log)
             wandb_video = wandb.Video(np.stack(ds.tensor2imgs(sample_log, cnvt_range=True, to_unint8=True, to_np=True)), fps=config.max_iter // config.animate_duration)
             pil_ls = ds.tensor2imgs(sample_log, to_pil=True)
             accelerator.log({"loss": fig, 'sample_evol': wandb_video, 'final_loss': loss_log[-1], 'final_sample': wandb.Image(pil_ls[-1])}, step=batch_idx)
@@ -697,7 +621,7 @@ def tmp_train():
                 sample.save(os.path.join(work_dir, config.training_sample_folder, f"sample{i}.jpg"))
             pil_ls[-1].save(os.path.join(work_dir, f"final.jpg"))
             pil_ls[0].save(os.path.join(work_dir, f"animate.gif"), save_all=True, append_images=pil_ls[1:], duration=config.animate_duration, loop=0)
-            save_file({'loss_vec_log': torch.stack(loss_vec_log), 'final_sample': pred.detach().cpu(), 'final_noise': noise.detach().cpu()}, os.path.join(work_dir, f"record.safetensors"))
+            save_file({'loss_vec_log': torch.stack(loss_vec_log), 'final_sample': sample_log[-1]}, os.path.join(work_dir, f"record.safetensors"))
             fig.savefig(os.path.join(work_dir, f"loss.jpg"))
             
             torch.cuda.empty_cache()
