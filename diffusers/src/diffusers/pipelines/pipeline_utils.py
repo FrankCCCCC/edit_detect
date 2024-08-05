@@ -126,7 +126,7 @@ class ImagePipelineOutputExt(BaseOutput):
 
     images: Union[List[PIL.Image.Image], np.ndarray]
     latents: np.ndarray
-    pred_orig_samples: Union[list[np.ndarray], np.ndarray]
+    pred_orig_samples: Union[List[np.ndarray], np.ndarray]
 
 @dataclass
 class AudioPipelineOutput(BaseOutput):
